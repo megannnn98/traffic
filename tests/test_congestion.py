@@ -49,41 +49,57 @@ class TestComputeCongestion:
     def test_normal(self) -> None:
         result = compute_congestion(
             segment_id="seg1",
-            duration_seconds=600,
-            free_flow_duration_seconds=240,
+            current_travel_time=153,
+            free_flow_travel_time=90,
+            current_speed=41,
+            free_flow_speed=70,
+            confidence=0.59,
         )
         assert result.segment_id == "seg1"
-        assert result.duration_seconds == 600
-        assert result.free_flow_duration_seconds == 240
-        assert result.delay_seconds == 360
-        assert result.congestion_ratio == pytest.approx(2.5)
-        assert result.congestion_level == CongestionLevel.TRAFFIC_JAM
+        assert result.current_speed_kmh == 41
+        assert result.free_flow_speed_kmh == 70
+        assert result.current_travel_time_seconds == 153
+        assert result.free_flow_travel_time_seconds == 90
+        assert result.confidence == 0.59
+        assert result.congestion_ratio == pytest.approx(153 / 90)
+        assert result.congestion_level == CongestionLevel.DENSE
 
     def test_no_free_flow(self) -> None:
         result = compute_congestion(
             segment_id="seg1",
-            duration_seconds=600,
-            free_flow_duration_seconds=0,
+            current_travel_time=153,
+            free_flow_travel_time=0,
         )
         assert result.congestion_level == CongestionLevel.UNKNOWN
         assert result.congestion_ratio is None
-        assert result.delay_seconds == 0
-
-    def test_negative_delay_clamped(self) -> None:
-        result = compute_congestion(
-            segment_id="seg1",
-            duration_seconds=100,
-            free_flow_duration_seconds=240,
-        )
-        assert result.delay_seconds == 0
-        assert result.congestion_ratio == pytest.approx(100 / 240)
 
     def test_none_duration(self) -> None:
         result = compute_congestion(
             segment_id="seg1",
-            duration_seconds=None,
-            free_flow_duration_seconds=240,
+            current_travel_time=None,
+            free_flow_travel_time=90,
         )
         assert result.congestion_level == CongestionLevel.UNKNOWN
         assert result.congestion_ratio is None
-        assert result.delay_seconds == 0
+
+    def test_road_closure(self) -> None:
+        result = compute_congestion(
+            segment_id="seg1",
+            current_travel_time=0,
+            free_flow_travel_time=90,
+            road_closure=True,
+        )
+        assert result.road_closure is True
+        assert result.congestion_level == CongestionLevel.SEVERE_TRAFFIC_JAM
+        assert result.congestion_ratio is None
+
+    def test_speed_ratio(self) -> None:
+        result = compute_congestion(
+            segment_id="seg1",
+            current_travel_time=153,
+            free_flow_travel_time=90,
+            current_speed=41,
+            free_flow_speed=70,
+        )
+        assert result.current_speed_kmh == 41
+        assert result.free_flow_speed_kmh == 70

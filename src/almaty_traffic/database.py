@@ -5,7 +5,7 @@ from pathlib import Path
 
 import aiosqlite
 
-from almaty_traffic.models import MeasurementStatus, RouteMeasurement
+from almaty_traffic.models import MeasurementStatus, TrafficMeasurement
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS segments (
@@ -26,8 +26,13 @@ CREATE TABLE IF NOT EXISTS measurements (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   timestamp TEXT NOT NULL,
   segment_id TEXT NOT NULL,
-  distance_meters INTEGER,
-  duration_seconds INTEGER,
+  current_speed_kmh INTEGER,
+  free_flow_speed_kmh INTEGER,
+  current_travel_time_seconds INTEGER,
+  free_flow_travel_time_seconds INTEGER,
+  confidence REAL,
+  road_closure INTEGER NOT NULL DEFAULT 0,
+  frc TEXT,
   status TEXT NOT NULL,
   error_message TEXT,
   raw_response TEXT,
@@ -68,18 +73,24 @@ class Database:
         async with self._conn() as conn:
             await conn.executescript(_SCHEMA)
 
-    async def insert_measurement(self, m: RouteMeasurement) -> None:
+    async def insert_measurement(self, m: TrafficMeasurement) -> None:
         async with self._conn() as conn:
             await conn.execute(
                 """INSERT INTO measurements
-                   (timestamp, segment_id, distance_meters, duration_seconds,
-                    status, error_message, raw_response)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                   (timestamp, segment_id, current_speed_kmh, free_flow_speed_kmh,
+                    current_travel_time_seconds, free_flow_travel_time_seconds,
+                    confidence, road_closure, frc, status, error_message, raw_response)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     m.timestamp,
                     m.segment_id,
-                    m.distance_meters,
-                    m.duration_seconds,
+                    m.current_speed_kmh,
+                    m.free_flow_speed_kmh,
+                    m.current_travel_time_seconds,
+                    m.free_flow_travel_time_seconds,
+                    m.confidence,
+                    1 if m.road_closure else 0,
+                    m.frc,
                     m.status.value,
                     m.error_message,
                     json.dumps(m.raw_response, ensure_ascii=False) if m.raw_response else None,
@@ -88,7 +99,7 @@ class Database:
 
     async def get_measurements(
         self, segment_id: str, hours: int = 24, timezone: str = "Asia/Almaty"
-    ) -> list[RouteMeasurement]:
+    ) -> list[TrafficMeasurement]:
         from datetime import datetime, timedelta
         from zoneinfo import ZoneInfo
 
@@ -96,8 +107,9 @@ class Database:
 
         async with self._conn() as conn:
             cursor = await conn.execute(
-                """SELECT timestamp, segment_id, distance_meters, duration_seconds,
-                          status, error_message, raw_response
+                """SELECT timestamp, segment_id, current_speed_kmh, free_flow_speed_kmh,
+                          current_travel_time_seconds, free_flow_travel_time_seconds,
+                          confidence, road_closure, frc, status, error_message, raw_response
                    FROM measurements
                    WHERE segment_id = ?
                      AND timestamp >= ?
@@ -107,11 +119,16 @@ class Database:
             rows = await cursor.fetchall()
 
         return [
-            RouteMeasurement(
+            TrafficMeasurement(
                 timestamp=row["timestamp"],
                 segment_id=row["segment_id"],
-                distance_meters=row["distance_meters"],
-                duration_seconds=row["duration_seconds"],
+                current_speed_kmh=row["current_speed_kmh"],
+                free_flow_speed_kmh=row["free_flow_speed_kmh"],
+                current_travel_time_seconds=row["current_travel_time_seconds"],
+                free_flow_travel_time_seconds=row["free_flow_travel_time_seconds"],
+                confidence=row["confidence"],
+                road_closure=bool(row["road_closure"]),
+                frc=row["frc"],
                 status=MeasurementStatus(row["status"]),
                 error_message=row["error_message"],
                 raw_response=json.loads(row["raw_response"]) if row["raw_response"] else None,

@@ -35,13 +35,13 @@ async def calibrate_free_flow(
 
         night_durations = []
         for m in measurements:
-            if m.duration_seconds is None:
+            if m.current_travel_time_seconds is None:
                 continue
             try:
                 dt = datetime.fromisoformat(m.timestamp)
                 local_dt = dt.astimezone(tz)
                 if NIGHT_START_HOUR <= local_dt.hour < NIGHT_END_HOUR:
-                    night_durations.append(m.duration_seconds)
+                    night_durations.append(m.current_travel_time_seconds)
             except (ValueError, TypeError):
                 continue
 

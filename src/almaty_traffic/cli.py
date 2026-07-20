@@ -1,5 +1,7 @@
 import asyncio
+import json
 import logging
+from datetime import datetime
 from pathlib import Path
 
 import httpx
@@ -9,10 +11,16 @@ from almaty_traffic.config_loader import load_segments, validate_config
 from almaty_traffic.congestion import compute_congestion
 from almaty_traffic.database import Database
 from almaty_traffic.formatter import format_snapshot_json, format_snapshot_llm
-from almaty_traffic.models import RouteMeasurement, TrafficSegment
+from almaty_traffic.models import (
+    CongestionLevel,
+    CongestionResult,
+    SnapshotSummary,
+    TrafficMeasurement,
+    TrafficSegment,
+)
 from almaty_traffic.scheduler import run_loop
 from almaty_traffic.settings import ApiKeyFilter, Settings, load_settings
-from almaty_traffic.yandex_client import YandexDistanceMatrixClient
+from almaty_traffic.tomtom_client import TomTomTrafficClient
 
 app = typer.Typer(name="almaty-traffic", help="Сервис сбора и текстового описания пробок Алматы")
 
@@ -44,8 +52,8 @@ def collect(
     settings = load_settings()
     config_path = config or settings.segments_config
 
-    if not settings.yandex_api_key:
-        typer.echo("Ошибка: YANDEX_API_KEY не задан.", err=True)
+    if not settings.tomtom_api_key:
+        typer.echo("Ошибка: переменная окружения TOMTOM_API_KEY не задана.", err=True)
         raise typer.Exit(1)
 
     success, errors = validate_config(config_path)
@@ -73,12 +81,12 @@ async def _collect_async(
     await db.initialize()
 
     async with httpx.AsyncClient(timeout=settings.request_timeout_seconds) as http:
-        client = YandexDistanceMatrixClient(
+        client = TomTomTrafficClient(
             http_client=http,
-            api_key=settings.yandex_api_key,
+            api_key=settings.tomtom_api_key,
             timeout_seconds=settings.request_timeout_seconds,
         )
-        results = await client.get_routes(segments)
+        results = await client.get_segments(segments)
 
     ok_count = sum(1 for r in results if r.status.value == "OK")
     fail_count = sum(1 for r in results if r.status.value != "OK")
@@ -86,14 +94,27 @@ async def _collect_async(
     for m in results:
         await db.insert_measurement(m)
 
+    # Fallback: free_flow_duration_seconds из конфига, если API вернул None
+    ff_lookup: dict[str, int] = {}
+    for seg in segments:
+        if seg.free_flow_duration_seconds is not None:
+            ff_lookup[seg.id] = seg.free_flow_duration_seconds
+
     congestions = []
     for m in results:
-        if m.status.value == "OK" and m.duration_seconds is not None:
-            seg = next((s for s in segments if s.id == m.segment_id), None)
-            ff = seg.free_flow_duration_seconds if seg and seg.free_flow_duration_seconds else 0
-            congestions.append(compute_congestion(m.segment_id, m.duration_seconds, ff))
-
-    from almaty_traffic.models import SnapshotSummary
+        if m.status.value == "OK":
+            ff_time = m.free_flow_travel_time_seconds or ff_lookup.get(m.segment_id, 0)
+            congestions.append(
+                compute_congestion(
+                    segment_id=m.segment_id,
+                    current_travel_time=m.current_travel_time_seconds,
+                    free_flow_travel_time=ff_time,
+                    current_speed=m.current_speed_kmh,
+                    free_flow_speed=m.free_flow_speed_kmh,
+                    confidence=m.confidence,
+                    road_closure=m.road_closure,
+                )
+            )
 
     summary = SnapshotSummary(
         total_segments=len(segments),
@@ -140,10 +161,35 @@ def report(
 
     if output_format == "json":
         typer.echo(snapshot["json_payload"])
-    elif output_format == "llm":
-        typer.echo(snapshot["text_payload"])
-    else:
-        typer.echo(snapshot["text_payload"])
+        return
+
+    if only_congested:
+        typer.echo(_render_llm_from_json(snapshot["json_payload"], only_congested=True))
+        return
+
+    typer.echo(snapshot["text_payload"])
+
+
+def _render_llm_from_json(json_payload: str, only_congested: bool) -> str:
+    """Восстановить CongestionResult/SnapshotSummary из сохранённого JSON-снимка."""
+    data = json.loads(json_payload)
+    results = [
+        CongestionResult(
+            segment_id=s["id"],
+            current_speed_kmh=s["current_speed_kmh"],
+            free_flow_speed_kmh=s["free_flow_speed_kmh"],
+            current_travel_time_seconds=s["current_travel_time_seconds"],
+            free_flow_travel_time_seconds=s["free_flow_travel_time_seconds"],
+            confidence=s["confidence"],
+            road_closure=s["road_closure"],
+            congestion_ratio=s["congestion_ratio"],
+            congestion_level=CongestionLevel(s["congestion_level"]),
+        )
+        for s in data["segments"]
+    ]
+    summary = SnapshotSummary(**data["summary"])
+    timestamp = datetime.fromisoformat(data["timestamp"])
+    return format_snapshot_llm(results, summary, only_congested=only_congested, timestamp=timestamp)
 
 
 @app.command()
@@ -155,7 +201,7 @@ def history(
     settings = load_settings()
     db = Database(settings.database_path)
 
-    async def _get() -> list[RouteMeasurement]:
+    async def _get() -> list[TrafficMeasurement]:
         await db.initialize()
         return await db.get_measurements(segment_id, hours)
 
@@ -166,8 +212,8 @@ def history(
 
     typer.echo(f"История участка '{segment_id}' за {hours}ч ({len(measurements)} записей):")
     for m in measurements:
-        dur = f"{m.duration_seconds}с" if m.duration_seconds else "N/A"
-        typer.echo(f"  {m.timestamp}  {dur}  {m.status.value}")
+        speed = f"{m.current_speed_kmh} км/ч" if m.current_speed_kmh is not None else "N/A"
+        typer.echo(f"  {m.timestamp}  {speed}  {m.status.value}")
 
 
 @app.command()
@@ -208,10 +254,9 @@ def main(
         datefmt="%Y-%m-%d %H:%M:%S",
     )
     settings = load_settings()
-    api_filter = ApiKeyFilter(settings.yandex_api_key)
+    api_filter = ApiKeyFilter(settings.tomtom_api_key)
     logging.getLogger("httpx").addFilter(api_filter)
     logging.getLogger("httpcore").addFilter(api_filter)
-    # Понижаем уровень httpx до WARNING, чтобы URL с API-ключом не попадал в логи
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     if version:

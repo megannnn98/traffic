@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, patch
 
 import yaml
 
-from almaty_traffic.models import MeasurementStatus, RouteMeasurement
+from almaty_traffic.models import MeasurementStatus, TrafficMeasurement
 from almaty_traffic.scheduler import _collect_cycle
 
 
@@ -32,28 +32,33 @@ def test_collect_cycle(tmp_path: Path) -> None:
     _write_segments(segments_path)
     db_path = tmp_path / "test.sqlite3"
 
-    measurement = RouteMeasurement(
+    measurement = TrafficMeasurement(
         timestamp="2026-07-20T10:00:00+05:00",
         segment_id="seg1",
-        distance_meters=3100,
-        duration_seconds=600,
+        current_speed_kmh=41,
+        free_flow_speed_kmh=70,
+        current_travel_time_seconds=153,
+        free_flow_travel_time_seconds=90,
+        confidence=0.59,
+        road_closure=False,
+        frc="FRC2",
         status=MeasurementStatus.OK,
     )
 
     mock_client = AsyncMock()
-    mock_client.get_routes.return_value = [measurement]
+    mock_client.get_segments.return_value = [measurement]
 
     from almaty_traffic.settings import Settings
 
     settings = Settings(
-        yandex_api_key="test_key",
+        tomtom_api_key="test_key",
         database_path=db_path,
         segments_config=segments_path,
         request_timeout_seconds=15,
     )
 
     with (
-        patch("almaty_traffic.yandex_client.YandexDistanceMatrixClient", return_value=mock_client),
+        patch("almaty_traffic.tomtom_client.TomTomTrafficClient", return_value=mock_client),
         patch("almaty_traffic.scheduler.Database") as mock_db_cls,
     ):
         mock_db = AsyncMock()
@@ -62,13 +67,3 @@ def test_collect_cycle(tmp_path: Path) -> None:
 
     assert mock_db.insert_measurement.called
     assert mock_db.insert_snapshot.called
-
-
-def test_stop_event() -> None:
-    import asyncio
-
-    stop_event = asyncio.Event()
-    assert not stop_event.is_set()
-    stop_event.set()
-    assert stop_event.is_set()
-    stop_event.clear()

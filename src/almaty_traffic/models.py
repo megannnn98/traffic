@@ -41,11 +41,18 @@ class MeasurementStatus(StrEnum):
     FAIL = "FAIL"
 
 
-class RouteMeasurement(BaseModel):
+class TrafficMeasurement(BaseModel):
+    """Измерение данных TomTom Flow Segment Data API."""
+
     timestamp: str
     segment_id: str
-    distance_meters: int | None = None
-    duration_seconds: int | None = None
+    current_speed_kmh: int | None = None
+    free_flow_speed_kmh: int | None = None
+    current_travel_time_seconds: int | None = None
+    free_flow_travel_time_seconds: int | None = None
+    confidence: float | None = None
+    road_closure: bool = False
+    frc: str | None = None
     status: MeasurementStatus
     error_message: str | None = None
     raw_response: dict[str, Any] | None = None
@@ -53,10 +60,13 @@ class RouteMeasurement(BaseModel):
 
 class CongestionResult(BaseModel):
     segment_id: str
-    duration_seconds: int | None
-    free_flow_duration_seconds: int
-    delay_seconds: int
-    congestion_ratio: float | None
+    current_speed_kmh: int | None = None
+    free_flow_speed_kmh: int | None = None
+    current_travel_time_seconds: int | None = None
+    free_flow_travel_time_seconds: int | None = None
+    confidence: float | None = None
+    road_closure: bool = False
+    congestion_ratio: float | None = None
     congestion_level: CongestionLevel
 
 

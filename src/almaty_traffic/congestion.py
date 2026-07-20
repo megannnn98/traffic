@@ -22,28 +22,50 @@ def classify_congestion(ratio: float) -> CongestionLevel:
 
 def compute_congestion(
     segment_id: str,
-    duration_seconds: int | None,
-    free_flow_duration_seconds: int,
+    current_travel_time: int | None,
+    free_flow_travel_time: int,
+    current_speed: int | None = None,
+    free_flow_speed: int | None = None,
+    confidence: float | None = None,
+    road_closure: bool = False,
 ) -> CongestionResult:
-    """Вычислить загруженность участка."""
-    if free_flow_duration_seconds <= 0 or duration_seconds is None:
+    """Вычислить загруженность участка по данным TomTom."""
+    if road_closure:
         return CongestionResult(
             segment_id=segment_id,
-            duration_seconds=duration_seconds,
-            free_flow_duration_seconds=free_flow_duration_seconds,
-            delay_seconds=0,
+            current_speed_kmh=current_speed,
+            free_flow_speed_kmh=free_flow_speed,
+            current_travel_time_seconds=current_travel_time,
+            free_flow_travel_time_seconds=free_flow_travel_time,
+            confidence=confidence,
+            road_closure=True,
+            congestion_ratio=None,
+            congestion_level=CongestionLevel.SEVERE_TRAFFIC_JAM,
+        )
+
+    if free_flow_travel_time <= 0 or current_travel_time is None:
+        return CongestionResult(
+            segment_id=segment_id,
+            current_speed_kmh=current_speed,
+            free_flow_speed_kmh=free_flow_speed,
+            current_travel_time_seconds=current_travel_time,
+            free_flow_travel_time_seconds=free_flow_travel_time,
+            confidence=confidence,
+            road_closure=road_closure,
             congestion_ratio=None,
             congestion_level=CongestionLevel.UNKNOWN,
         )
 
-    ratio = duration_seconds / free_flow_duration_seconds
-    delay = max(0, duration_seconds - free_flow_duration_seconds)
+    ratio = current_travel_time / free_flow_travel_time
 
     return CongestionResult(
         segment_id=segment_id,
-        duration_seconds=duration_seconds,
-        free_flow_duration_seconds=free_flow_duration_seconds,
-        delay_seconds=delay,
+        current_speed_kmh=current_speed,
+        free_flow_speed_kmh=free_flow_speed,
+        current_travel_time_seconds=current_travel_time,
+        free_flow_travel_time_seconds=free_flow_travel_time,
+        confidence=confidence,
+        road_closure=road_closure,
         congestion_ratio=ratio,
         congestion_level=classify_congestion(ratio),
     )

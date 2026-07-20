@@ -11,7 +11,7 @@ from almaty_traffic.database import Database
 from almaty_traffic.formatter import format_snapshot_json, format_snapshot_llm
 from almaty_traffic.models import SnapshotSummary
 from almaty_traffic.settings import Settings
-from almaty_traffic.yandex_client import YandexDistanceMatrixClient
+from almaty_traffic.tomtom_client import TomTomTrafficClient
 
 logger = logging.getLogger(__name__)
 
@@ -59,12 +59,12 @@ async def _collect_cycle(settings: Settings) -> None:
     await db.initialize()
 
     async with httpx.AsyncClient(timeout=settings.request_timeout_seconds) as http:
-        client = YandexDistanceMatrixClient(
+        client = TomTomTrafficClient(
             http_client=http,
-            api_key=settings.yandex_api_key,
+            api_key=settings.tomtom_api_key,
             timeout_seconds=settings.request_timeout_seconds,
         )
-        results = await client.get_routes(enabled)
+        results = await client.get_segments(enabled)
 
     for m in results:
         await db.insert_measurement(m)
@@ -72,12 +72,27 @@ async def _collect_cycle(settings: Settings) -> None:
     ok_count = sum(1 for r in results if r.status.value == "OK")
     fail_count = len(results) - ok_count
 
+    # Fallback: free_flow_duration_seconds из конфига, если API вернул None
+    ff_lookup: dict[str, int] = {}
+    for seg in enabled:
+        if seg.free_flow_duration_seconds is not None:
+            ff_lookup[seg.id] = seg.free_flow_duration_seconds
+
     congestions = []
     for m in results:
-        if m.status.value == "OK" and m.duration_seconds is not None:
-            seg = next((s for s in enabled if s.id == m.segment_id), None)
-            ff = seg.free_flow_duration_seconds if seg and seg.free_flow_duration_seconds else 0
-            congestions.append(compute_congestion(m.segment_id, m.duration_seconds, ff))
+        if m.status.value == "OK":
+            ff_time = m.free_flow_travel_time_seconds or ff_lookup.get(m.segment_id, 0)
+            congestions.append(
+                compute_congestion(
+                    segment_id=m.segment_id,
+                    current_travel_time=m.current_travel_time_seconds,
+                    free_flow_travel_time=ff_time,
+                    current_speed=m.current_speed_kmh,
+                    free_flow_speed=m.free_flow_speed_kmh,
+                    confidence=m.confidence,
+                    road_closure=m.road_closure,
+                )
+            )
 
     summary = SnapshotSummary(
         total_segments=len(enabled),

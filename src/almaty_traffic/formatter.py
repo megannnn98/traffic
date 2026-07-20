@@ -20,31 +20,15 @@ _LEVEL_NAMES = {
     CongestionLevel.DENSE: "Плотное движение",
     CongestionLevel.LIGHT: "Небольшое замедление",
     CongestionLevel.FREE: "Свободное движение",
+    CongestionLevel.UNKNOWN: "Нет данных о загруженности",
 }
-
-_LEVEL_NAMES_LLM = {
-    CongestionLevel.SEVERE_TRAFFIC_JAM: "Сильные пробки",
-    CongestionLevel.TRAFFIC_JAM: "Пробки",
-    CongestionLevel.DENSE: "Плотное движение",
-    CongestionLevel.LIGHT: "Небольшое замедление",
-    CongestionLevel.FREE: "Свободное движение",
-}
-
-
-def format_minutes(n: int) -> str:
-    """Склонение минут: 1 минута, 2 минуты, 5 минут, 21 минута, ..."""
-    if 11 <= n % 100 <= 19:
-        return f"{n} минут"
-    last = n % 10
-    if last == 1:
-        return f"{n} минута"
-    if 2 <= last <= 4:
-        return f"{n} минуты"
-    return f"{n} минут"
 
 
 def _sort_results(results: list[CongestionResult]) -> list[CongestionResult]:
-    return sorted(results, key=lambda r: (_LEVEL_ORDER[r.congestion_level], -r.delay_seconds))
+    return sorted(
+        results,
+        key=lambda r: (_LEVEL_ORDER[r.congestion_level], -(r.congestion_ratio or 0)),
+    )
 
 
 def _now_almaty() -> datetime:
@@ -61,9 +45,12 @@ def format_snapshot_json(results: list[CongestionResult], summary: SnapshotSumma
         segments.append(
             {
                 "id": r.segment_id,
-                "duration_seconds": r.duration_seconds,
-                "free_flow_duration_seconds": r.free_flow_duration_seconds,
-                "delay_seconds": r.delay_seconds,
+                "current_speed_kmh": r.current_speed_kmh,
+                "free_flow_speed_kmh": r.free_flow_speed_kmh,
+                "current_travel_time_seconds": r.current_travel_time_seconds,
+                "free_flow_travel_time_seconds": r.free_flow_travel_time_seconds,
+                "confidence": r.confidence,
+                "road_closure": r.road_closure,
                 "congestion_ratio": (
                     round(r.congestion_ratio, 2) if r.congestion_ratio is not None else None
                 ),
@@ -74,7 +61,7 @@ def format_snapshot_json(results: list[CongestionResult], summary: SnapshotSumma
     snapshot = {
         "timestamp": now.isoformat(),
         "city": "Алматы",
-        "source": "Yandex Distance Matrix API",
+        "source": "TomTom Flow Segment Data API",
         "segments": segments,
         "summary": {
             "total_segments": summary.total_segments,
@@ -87,31 +74,40 @@ def format_snapshot_json(results: list[CongestionResult], summary: SnapshotSumma
     return json.dumps(snapshot, ensure_ascii=False, indent=2)
 
 
-def _format_duration_line(r: CongestionResult) -> str:
+def _format_segment_line(r: CongestionResult) -> str:
     """Одна строка описания участка."""
-    if r.duration_seconds is None:
-        return "— Нет данных о времени."
+    if r.road_closure:
+        return "Дорога перекрыта."
 
-    duration_min = r.duration_seconds // 60
-    free_min = r.free_flow_duration_seconds // 60
-    delay_min = r.delay_seconds // 60
+    if r.current_speed_kmh is None or r.free_flow_speed_kmh is None:
+        return "Нет данных о скорости."
 
-    parts = [f"Поездка занимает {format_minutes(duration_min)}"]
-    if free_min > 0:
-        parts[0] += f" вместо обычных {format_minutes(free_min)}"
-    parts[0] += "."
-    if delay_min > 0:
-        parts.append(f"Задержка около {format_minutes(delay_min)}.")
-    return " ".join(parts)
+    speed_drop_pct = 0
+    if r.free_flow_speed_kmh > 0:
+        speed_drop_pct = int((1 - r.current_speed_kmh / r.free_flow_speed_kmh) * 100)
+
+    lines = [
+        f"Текущая скорость: {r.current_speed_kmh} км/ч.",
+        f"Обычная скорость: {r.free_flow_speed_kmh} км/ч.",
+        f"Снижение скорости: {speed_drop_pct}%.",
+    ]
+
+    if r.current_travel_time_seconds and r.free_flow_travel_time_seconds:
+        current_min = r.current_travel_time_seconds // 60
+        free_min = r.free_flow_travel_time_seconds // 60
+        lines.append(f"Поездка: {current_min} мин вместо {free_min} мин.")
+
+    return " ".join(lines)
 
 
 def format_snapshot_llm(
     results: list[CongestionResult],
     summary: SnapshotSummary,
     only_congested: bool = False,
+    timestamp: datetime | None = None,
 ) -> str:
     """Русский текст для LLM."""
-    now = _now_almaty()
+    now = timestamp or _now_almaty()
     date_str = now.strftime("%d.%m.%Y")
     time_str = now.strftime("%H:%M")
     lines = [f"Дорожная обстановка в Алматы на {date_str} года, {time_str}.\n"]
@@ -119,7 +115,11 @@ def format_snapshot_llm(
     sorted_results = _sort_results(results)
 
     if only_congested:
-        sorted_results = [r for r in sorted_results if r.congestion_level != CongestionLevel.FREE]
+        sorted_results = [
+            r
+            for r in sorted_results
+            if r.congestion_level not in (CongestionLevel.FREE, CongestionLevel.UNKNOWN)
+        ]
 
     grouped: dict[CongestionLevel, list[CongestionResult]] = defaultdict(list)
     for r in sorted_results:
@@ -131,13 +131,14 @@ def format_snapshot_llm(
         CongestionLevel.DENSE,
         CongestionLevel.LIGHT,
         CongestionLevel.FREE,
+        CongestionLevel.UNKNOWN,
     ):
         segs = grouped.get(level, [])
         if not segs:
             continue
         lines.append(f"{_LEVEL_NAMES[level]}:")
         for r in segs:
-            lines.append(f"— {r.segment_id}. {_format_duration_line(r)}")
+            lines.append(f"— {r.segment_id}. {_format_segment_line(r)}")
         lines.append("")
 
     if summary.failed_segments > 0:
@@ -157,11 +158,18 @@ def format_snapshot_machine(results: list[CongestionResult], summary: SnapshotSu
 
     for r in _sort_results(results):
         lines.append(f"segment={r.segment_id}")
-        if r.duration_seconds is not None:
-            lines.append(f"duration_min={r.duration_seconds // 60}")
-        if r.free_flow_duration_seconds > 0:
-            lines.append(f"baseline_min={r.free_flow_duration_seconds // 60}")
-        lines.append(f"delay_min={r.delay_seconds // 60}")
+        if r.road_closure:
+            lines.append("road_closure=true")
+        if r.current_speed_kmh is not None:
+            lines.append(f"current_speed={r.current_speed_kmh}")
+        if r.free_flow_speed_kmh is not None:
+            lines.append(f"free_flow_speed={r.free_flow_speed_kmh}")
+        if r.current_travel_time_seconds is not None:
+            lines.append(f"travel_time={r.current_travel_time_seconds}")
+        if r.free_flow_travel_time_seconds is not None:
+            lines.append(f"free_flow_travel_time={r.free_flow_travel_time_seconds}")
+        if r.confidence is not None:
+            lines.append(f"confidence={r.confidence}")
         lines.append(f"congestion_level={r.congestion_level.value}")
         lines.append("")
 

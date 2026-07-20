@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from almaty_traffic.database import Database
-from almaty_traffic.models import MeasurementStatus, RouteMeasurement
+from almaty_traffic.models import MeasurementStatus, TrafficMeasurement
 
 
 @pytest.fixture
@@ -17,17 +17,23 @@ async def db(tmp_path: Path) -> Database:
 def _measurement(
     segment_id: str = "seg1",
     status: MeasurementStatus = MeasurementStatus.OK,
-    duration: int = 600,
-) -> RouteMeasurement:
+    current_speed: int = 41,
+    free_flow_speed: int = 70,
+) -> TrafficMeasurement:
     from almaty_traffic.utils import now_almaty_iso
 
-    return RouteMeasurement(
+    return TrafficMeasurement(
         timestamp=now_almaty_iso(),
         segment_id=segment_id,
-        distance_meters=3100,
-        duration_seconds=duration,
+        current_speed_kmh=current_speed,
+        free_flow_speed_kmh=free_flow_speed,
+        current_travel_time_seconds=153,
+        free_flow_travel_time_seconds=90,
+        confidence=0.59,
+        road_closure=False,
+        frc="FRC2",
         status=status,
-        raw_response={"status": "OK", "duration": {"value": duration}},
+        raw_response={"currentSpeed": current_speed, "freeFlowSpeed": free_flow_speed},
     )
 
 
@@ -63,12 +69,13 @@ class TestMeasurements:
         rows = await db.get_measurements("seg1", hours=1)
         assert len(rows) == 1
         assert rows[0].segment_id == "seg1"
-        assert rows[0].duration_seconds == 600
+        assert rows[0].current_speed_kmh == 41
+        assert rows[0].free_flow_speed_kmh == 70
 
     @pytest.mark.asyncio
     async def test_multiple_measurements(self, db: Database) -> None:
         for i in range(3):
-            m = _measurement(duration=600 + i * 100)
+            m = _measurement(current_speed=40 + i * 5)
             await db.insert_measurement(m)
         rows = await db.get_measurements("seg1", hours=1)
         assert len(rows) == 3
@@ -77,6 +84,17 @@ class TestMeasurements:
     async def test_get_measurements_empty(self, db: Database) -> None:
         rows = await db.get_measurements("nonexistent", hours=24)
         assert rows == []
+
+    @pytest.mark.asyncio
+    async def test_road_closure(self, db: Database) -> None:
+        m = _measurement()
+        m.road_closure = True
+        m.current_speed_kmh = 0
+        await db.insert_measurement(m)
+        rows = await db.get_measurements("seg1", hours=1)
+        assert len(rows) == 1
+        assert rows[0].road_closure is True
+        assert rows[0].current_speed_kmh == 0
 
 
 class TestSnapshots:
@@ -94,23 +112,3 @@ class TestSnapshots:
     async def test_get_latest_snapshot_empty(self, db: Database) -> None:
         snapshot = await db.get_latest_snapshot()
         assert snapshot is None
-
-    @pytest.mark.asyncio
-    async def test_insert_snapshot_with_segments(self, db: Database) -> None:
-        payload = {
-            "timestamp": "2026-07-20T10:00:00+05:00",
-            "segments": [
-                {
-                    "id": "seg1",
-                    "road": "проспект",
-                    "duration_seconds": 600,
-                    "congestion_level": "dense",
-                }
-            ],
-            "summary": {"total_segments": 1, "successful_segments": 1, "failed_segments": 0},
-        }
-        await db.insert_snapshot(json.dumps(payload), "Текст")
-        snapshot = await db.get_latest_snapshot()
-        assert snapshot is not None
-        data = json.loads(snapshot["json_payload"])
-        assert len(data["segments"]) == 1

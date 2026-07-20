@@ -5,7 +5,7 @@ import yaml
 
 from almaty_traffic.calibrate import calibrate_free_flow
 from almaty_traffic.database import Database
-from almaty_traffic.models import MeasurementStatus, RouteMeasurement
+from almaty_traffic.models import MeasurementStatus, TrafficMeasurement
 from almaty_traffic.settings import Settings
 
 
@@ -32,13 +32,18 @@ async def _populate_night_measurements(db_path: Path, segments_path: Path) -> No
     db = Database(db_path)
     await db.initialize()
 
-    # 10 ночных замеров (03:00 MSK = 03:00 Almaty)
+    # 10 ночных замеров (03:00 Almaty)
     for i in range(10):
-        m = RouteMeasurement(
+        m = TrafficMeasurement(
             timestamp=f"2026-07-1{i}T03:00:00+05:00",
             segment_id="seg1",
-            distance_meters=3100,
-            duration_seconds=200 + i * 10,  # 200, 210, 220, ... 290
+            current_speed_kmh=40 + i * 2,
+            free_flow_speed_kmh=70,
+            current_travel_time_seconds=200 + i * 10,  # 200, 210, ... 290
+            free_flow_travel_time_seconds=90,
+            confidence=0.8,
+            road_closure=False,
+            frc="FRC2",
             status=MeasurementStatus.OK,
         )
         await db.insert_measurement(m)
@@ -51,7 +56,7 @@ def test_calibrate_free_flow(tmp_path: Path) -> None:
     asyncio.run(_populate_night_measurements(db_path, segments_path))
 
     settings = Settings(
-        yandex_api_key="test_key",
+        tomtom_api_key="test_key",
         database_path=db_path,
         segments_config=segments_path,
         request_timeout_seconds=15,
@@ -70,7 +75,7 @@ def test_calibrate_no_measurements(tmp_path: Path) -> None:
     asyncio.run(Database(db_path).initialize())
 
     settings = Settings(
-        yandex_api_key="test_key",
+        tomtom_api_key="test_key",
         database_path=db_path,
         segments_config=segments_path,
         request_timeout_seconds=15,

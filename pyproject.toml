@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "almaty-traffic"
 version = "0.1.0"
-description = "CLI-сервис сбора и текстового описания пробок Алматы через Yandex Distance Matrix API"
+description = "CLI-сервис сбора и текстового описания пробок Алматы через TomTom Flow Segment Data API"
 requires-python = ">=3.12"
 dependencies = [
     "aiosqlite>=0.20",

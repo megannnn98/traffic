@@ -36,7 +36,7 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    yandex_api_key: str = Field(default="", alias="YANDEX_API_KEY")
+    tomtom_api_key: str = Field(default="", alias="TOMTOM_API_KEY")
     database_path: Path = Path("data/traffic.sqlite3")
     segments_config: Path = Path("config/segments.yaml")
     request_timeout_seconds: float = 15.0

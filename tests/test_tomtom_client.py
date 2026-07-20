@@ -1,8 +1,8 @@
 import httpx
 import pytest
 
-from almaty_traffic.models import MeasurementStatus, RouteMeasurement, TrafficSegment
-from almaty_traffic.yandex_client import YandexDistanceMatrixClient
+from almaty_traffic.models import MeasurementStatus, TrafficMeasurement, TrafficSegment
+from almaty_traffic.tomtom_client import TomTomTrafficClient
 
 
 def _segment(seg_id: str = "seg1") -> TrafficSegment:
@@ -19,30 +19,42 @@ def _segment(seg_id: str = "seg1") -> TrafficSegment:
     )
 
 
-def _ok_response(duration: int = 600, distance: int = 3100) -> httpx.Response:
+def _ok_response(
+    current_speed: int = 41,
+    free_flow_speed: int = 70,
+    current_travel_time: int = 153,
+    free_flow_travel_time: int = 90,
+    confidence: float = 0.59,
+    road_closure: bool = False,
+) -> httpx.Response:
     body = {
-        "rows": [
-            {
-                "elements": [
-                    {
-                        "status": "OK",
-                        "duration": {"value": duration, "text": f"{duration // 60} mins"},
-                        "distance": {"value": distance, "text": f"{distance} m"},
-                    }
+        "flowSegmentData": {
+            "frc": "FRC2",
+            "currentSpeed": current_speed,
+            "freeFlowSpeed": free_flow_speed,
+            "currentTravelTime": current_travel_time,
+            "freeFlowTravelTime": free_flow_travel_time,
+            "confidence": confidence,
+            "roadClosure": road_closure,
+            "coordinates": {
+                "coordinate": [
+                    {"latitude": 43.2381, "longitude": 76.9452},
                 ]
-            }
-        ]
+            },
+        }
     }
     return httpx.Response(200, json=body)
 
 
-def _fail_response() -> httpx.Response:
-    body = {"rows": [{"elements": [{"status": "FAIL"}]}]}
-    return httpx.Response(200, json=body)
-
-
 def _error_response(status_code: int, message: str = "error") -> httpx.Response:
-    return httpx.Response(status_code, json={"errors": [message]})
+    return httpx.Response(
+        status_code,
+        json={
+            "error": message,
+            "httpStatusCode": status_code,
+            "detailedError": {"code": "ERROR", "message": message},
+        },
+    )
 
 
 def _broken_json_response() -> httpx.Response:
@@ -51,37 +63,40 @@ def _broken_json_response() -> httpx.Response:
 
 async def _get_measurements(
     handler, segments: list[TrafficSegment] | None = None
-) -> list[RouteMeasurement]:
+) -> list[TrafficMeasurement]:
     transport = httpx.MockTransport(handler)
     async with httpx.AsyncClient(transport=transport) as http:
-        client = YandexDistanceMatrixClient(
+        client = TomTomTrafficClient(
             http_client=http,
             api_key="test_key",
             timeout_seconds=10,
         )
         segs = segments or [_segment()]
-        return await client.get_routes(segs)
+        return await client.get_segments(segs)
 
 
-class TestGetRoutes:
+class TestGetSegments:
     @pytest.mark.asyncio
     async def test_successful_response(self) -> None:
         results = await _get_measurements(lambda req: _ok_response())
         assert len(results) == 1
         m = results[0]
         assert m.status == MeasurementStatus.OK
-        assert m.duration_seconds == 600
-        assert m.distance_meters == 3100
+        assert m.current_speed_kmh == 41
+        assert m.free_flow_speed_kmh == 70
+        assert m.current_travel_time_seconds == 153
+        assert m.free_flow_travel_time_seconds == 90
+        assert m.confidence == 0.59
+        assert m.road_closure is False
         assert m.segment_id == "seg1"
-        assert m.error_message is None
 
     @pytest.mark.asyncio
-    async def test_401_unauthorized(self) -> None:
-        results = await _get_measurements(lambda req: _error_response(401, "Invalid API key"))
+    async def test_403_forbidden(self) -> None:
+        results = await _get_measurements(lambda req: _error_response(403, "Forbidden"))
         m = results[0]
         assert m.status == MeasurementStatus.FAIL
         assert m.error_message is not None
-        assert "401" in m.error_message or "Invalid" in m.error_message
+        assert "403" in m.error_message
 
     @pytest.mark.asyncio
     async def test_429_rate_limit(self) -> None:
@@ -89,6 +104,12 @@ class TestGetRoutes:
         m = results[0]
         assert m.status == MeasurementStatus.FAIL
         assert m.error_message is not None
+
+    @pytest.mark.asyncio
+    async def test_500_server_error(self) -> None:
+        results = await _get_measurements(lambda req: _error_response(500, "Internal Server Error"))
+        m = results[0]
+        assert m.status == MeasurementStatus.FAIL
 
     @pytest.mark.asyncio
     async def test_timeout(self) -> None:
@@ -101,17 +122,28 @@ class TestGetRoutes:
         assert m.error_message is not None
 
     @pytest.mark.asyncio
-    async def test_fail_status(self) -> None:
-        results = await _get_measurements(lambda req: _fail_response())
-        m = results[0]
-        assert m.status == MeasurementStatus.FAIL
-
-    @pytest.mark.asyncio
     async def test_broken_json(self) -> None:
         results = await _get_measurements(lambda req: _broken_json_response())
         m = results[0]
         assert m.status == MeasurementStatus.FAIL
         assert m.error_message is not None
+
+    @pytest.mark.asyncio
+    async def test_road_closure(self) -> None:
+        results = await _get_measurements(
+            lambda req: _ok_response(road_closure=True, current_speed=0)
+        )
+        m = results[0]
+        assert m.status == MeasurementStatus.OK
+        assert m.road_closure is True
+        assert m.current_speed_kmh == 0
+
+    @pytest.mark.asyncio
+    async def test_low_confidence(self) -> None:
+        results = await _get_measurements(lambda req: _ok_response(confidence=0.0))
+        m = results[0]
+        assert m.status == MeasurementStatus.OK
+        assert m.confidence == 0.0
 
     @pytest.mark.asyncio
     async def test_partial_success(self) -> None:
@@ -134,7 +166,7 @@ class TestGetRoutes:
     @pytest.mark.asyncio
     async def test_multiple_segments(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
-            return _ok_response(duration=300, distance=2000)
+            return _ok_response(current_speed=60, free_flow_speed=80)
 
         segs = [_segment("a"), _segment("b"), _segment("c")]
         results = await _get_measurements(handler, segments=segs)
