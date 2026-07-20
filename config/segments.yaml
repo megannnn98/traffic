@@ -1,0 +1,28 @@
+segments:
+  - id: abai_nazarbayev_seifullin_east
+    road: проспект Абая
+    direction: восток
+    from_name: проспект Назарбаева
+    to_name: проспект Сейфуллина
+    origin:
+      latitude: 43.2381
+      longitude: 76.9452
+    destination:
+      latitude: 43.2384
+      longitude: 76.9281
+    free_flow_duration_seconds: 240
+    enabled: true
+
+  - id: al_farabi_dostyk_nazarbayev_west
+    road: проспект Аль-Фараби
+    direction: запад
+    from_name: проспект Достык
+    to_name: проспект Назарбаева
+    origin:
+      latitude: 43.2081
+      longitude: 76.9600
+    destination:
+      latitude: 43.2110
+      longitude: 76.9420
+    free_flow_duration_seconds: 300
+    enabled: true
